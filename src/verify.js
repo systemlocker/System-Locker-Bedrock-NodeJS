@@ -100,6 +100,7 @@ function parsePayload(config, jsonText, expectedChallenge, nowMs, httpResponse =
     licenseKeyHash: optionalString('license_key_hash'),
     usernameHash: optionalString('username_hash'),
     terminationMessage: optionalString('termination_message'),
+    ssoUrl: optionalString('sso_url'),
     invisibleFolderToken: optionalString('invisible_folder_token'),
     variables: {},
   };

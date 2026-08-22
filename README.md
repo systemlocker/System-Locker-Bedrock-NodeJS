@@ -84,6 +84,31 @@ if (result.downloaded) lastRevision = result.revision; // persist this
 `downloadIfNew` (revision-checked) are available. Tokens live in memory only
 and clear on `shutdown()`.
 
+## Google SSO (account authentication)
+
+Accounts created through Google sign-in have no local password on the
+server. A `username`/`password` authentication for such an account is
+answered with a signed `GOOGLE_SSO_REQUIRED` denial whose payload carries
+`sso_url` — the portal where the user completes Google sign-in and receives
+a system-specific password (valid 180 days) to use as their account
+password. There is no callback; the user transcribes the generated password
+into your login form and you simply retry.
+
+```js
+const result = await client.authenticateWithPassword(username, password);
+if (result.response.responseCode === 'GOOGLE_SSO_REQUIRED') {
+  // The denial's URL is authoritative; open it in the default browser.
+  const portal = result.response.ssoUrl ?? client.googleSsoUrl();
+  if (!bedrock.openUrl(portal)) {
+    console.log(`Finish Google sign-in at: ${portal}`); // headless fallback
+  }
+}
+```
+
+You can also start the flow before any denial: `client.beginGoogleSso()`
+(or `bedrock.beginGoogleSso(systemId)`) opens the portal and returns
+`{ url, opened }`.
+
 ## Device identifiers (HWID)
 
 The library derives a hardware ID by default; set `config.hwid = "1"` only to

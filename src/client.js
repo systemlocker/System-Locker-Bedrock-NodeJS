@@ -6,6 +6,7 @@ const { FetchHttpClient, responseOk } = require('./transport');
 const { generateChallenge, sha256Hex, verifySignedResponse, parseUnsignedRevocation } = require('./verify');
 const { BedrockSession } = require('./session');
 const { InvisibleFolder } = require('./invisible-folder');
+const { googleSsoUrl, beginGoogleSso } = require('./sso');
 
 /**
  * Bedrock client for one system. Construct, call authenticateWithKey or
@@ -69,6 +70,17 @@ class Client {
    */
   authenticateWithPassword(username, password, options = {}) {
     return this._authenticate({ username, password }, username, false, options);
+  }
+
+  /** Returns the Google SSO portal URL for the configured system. */
+  googleSsoUrl() {
+    return googleSsoUrl(this.config.systemId);
+  }
+
+  /** Opens the Google SSO portal for the configured system; see sso.js for
+   * the { url, opened } result contract. */
+  beginGoogleSso() {
+    return beginGoogleSso(this.config.systemId);
   }
 
   async _authenticate(extraFields, identity, keyAuthentication, options) {
