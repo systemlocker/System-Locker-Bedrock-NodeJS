@@ -1,6 +1,6 @@
 {
   "name": "systemlocker-bedrock",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "Official System Locker Bedrock client for Node.js \u2014 Ed25519-signed responses, rotating session tokens, and per-request challenges for software on untrusted machines.",
   "repository": {
     "type": "git",

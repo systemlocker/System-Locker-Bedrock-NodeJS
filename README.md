@@ -96,12 +96,12 @@ into your login form and you simply retry.
 
 ```js
 const result = await client.authenticateWithPassword(username, password);
-if (result.response.responseCode === 'GOOGLE_SSO_REQUIRED') {
-  // The denial's URL is authoritative; open it in the default browser.
-  const portal = result.response.ssoUrl ?? client.googleSsoUrl();
-  if (!bedrock.openUrl(portal)) {
-    console.log(`Finish Google sign-in at: ${portal}`); // headless fallback
-  }
+if (result.response.responseCode === "GOOGLE_SSO_REQUIRED") {
+	// The denial's URL is authoritative; open it in the default browser.
+	const portal = result.response.ssoUrl ?? client.googleSsoUrl();
+	if (!bedrock.openUrl(portal)) {
+		console.log(`Finish Google sign-in at: ${portal}`); // headless fallback
+	}
 }
 ```
 
@@ -123,6 +123,33 @@ config.hwid = await deviceHwid();
 Derives a stable identifier from the machine GUID, hardware UUID, CPU id,
 and MAC (Windows and Linux). Passing your own stable value works just as
 well — and avoids hardware-enumeration quirks entirely.
+
+### Fault-tolerant HWID (SL-HWID)
+
+SL-HWID is the default device identifier since 1.0.0 — a change from
+pre-1.0 versions. It is fault tolerant, cross platform (Windows, macOS,
+Linux), and combines **14 hardware factors** by default: any two can fail
+or change without changing the HWID, and drifted factors are quietly
+re-absorbed after each successful authentication. The point is to prevent
+over-fitting to any single machine detail while avoiding over-dependence
+on the exact hardware configuration.
+
+Keep the pre-1.0 behavior with `hwidMode: 'legacy'`. A custom `hwid` value (or "1" to
+disable device locking entirely) still wins over both modes.
+
+Default storage is shared by all Bedrock applications for the current user,
+so they report the same HWID on the same device. A short-lived interprocess
+lock serializes enrollment and refresh; a crashed process's marker is
+recovered automatically. Configure a different `slHwidStore` only when you
+deliberately need separate device state. Re-enrolling changes the HWID for
+every application sharing that storage.
+
+The HWID determination is deliberately best-effort, but it is expected to
+match runs of the same application, and, in most cases, across any
+application run on the same device and operating system.
+
+A hard lock chosen when the shared device state is enrolled cannot be
+weakened by another application.
 
 ## Security
 

@@ -6,12 +6,15 @@ function defaultConfig() {
     systemId: '',
     version: 'bypass',
     hwid: null,
+    hwidMode: 'sl-hwid',
+    slHwidStore: null,
+    slHwidExtraMandatory: null,
     beatRateMs: 30_000,
     requestTimeoutMs: 15_000,
     maxServerClockSkewSeconds: 120,
     baseUrl: 'https://systemlocker.net',
     invisibleFolderBaseUrl: 'https://invisiblefolder.net',
-    userAgent: 'systemlocker-bedrock-node/0.1',
+    userAgent: 'systemlocker-bedrock-node/1.0',
     programDigest: null,
     signingKeyId: null,
     invisibleFolderApiKey: null,
@@ -29,6 +32,9 @@ const SYSTEM_ID_PATTERN = /^[A-Za-z0-9]{20}$/;
  */
 function validateConfig(config) {
   const { BedrockError, ErrorKind } = require('./errors');
+  if (config.hwidMode !== undefined && config.hwidMode !== 'legacy' && config.hwidMode !== 'sl-hwid') {
+    throw new BedrockError(ErrorKind.Configuration, 'HWID mode must be "legacy" or "sl-hwid".');
+  }
   if (!SYSTEM_ID_PATTERN.test(config.systemId ?? '')) {
     throw new BedrockError(ErrorKind.Configuration, 'System ID must be exactly 20 alphanumeric characters.');
   }

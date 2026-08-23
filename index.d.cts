@@ -17,6 +17,9 @@ declare namespace Bedrock {
     systemId: string;
     version?: string;
     hwid?: string;
+    hwidMode?: 'legacy' | 'sl-hwid';
+    slHwidStore?: string | null;
+    slHwidExtraMandatory?: string[] | null;
     beatRateMs?: number;
     requestTimeoutMs?: number;
     maxServerClockSkewSeconds?: number;

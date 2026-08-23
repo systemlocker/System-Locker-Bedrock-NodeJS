@@ -44,6 +44,30 @@ class Client {
     return verifySignedResponse(this.config, httpResponse, challenge, this.now());
   }
 
+  /**
+   * Recovers the shared device HWID. Sessions are cached per identity only
+   * to preserve their independent post-authentication commit lifecycle.
+   */
+  async _prepareSecretSharing(identity) {
+    this._ssSessions ??= new Map();
+    const cached = this._ssSessions.get(identity);
+    if (cached) {
+      return cached;
+    }
+    const options = {
+      storePath: this.config.slHwidStore ?? undefined,
+      extraMandatory: this.config.slHwidExtraMandatory ?? undefined,
+    };
+    let session;
+    try {
+      session = await (Client._ssPrepare ?? require('../hwid/slhwid.cjs').prepare)(options);
+    } catch (error) {
+      throw fail(ErrorKind.LocalFailure, `Secret-sharing HWID unavailable: ${error.message}`);
+    }
+    this._ssSessions.set(identity, session);
+    return session;
+  }
+
   parseUnsigned(httpResponse, challenge) {
     return parseUnsignedRevocation(this.config, httpResponse, challenge, this.now());
   }
@@ -84,18 +108,26 @@ class Client {
   }
 
   async _authenticate(extraFields, identity, keyAuthentication, options) {
-    if (this.config.hwid === null || this.config.hwid === '') {
-      try {
-        this.config.hwid = await require('../hwid/collect.cjs').deviceHwid();
-      } catch (error) {
-        throw fail(ErrorKind.Configuration, `Could not derive the default hardware ID: ${error.message}. Supply a custom HWID or use "1" to disable device checks.`);
+    let hwidValue = this.config.hwid;
+    let ssSession = null;
+    if (hwidValue === null || hwidValue === '') {
+      if (this.config.hwidMode !== 'legacy') { // 'sl-hwid' is the 1.0.0 default
+        ssSession = await this._prepareSecretSharing(identity); // recover or enroll at auth time
+        hwidValue = ssSession.hwid;
+      } else {
+        try {
+          this.config.hwid = await require('../hwid/collect.cjs').deviceHwid();
+        } catch (error) {
+          throw fail(ErrorKind.Configuration, `Could not derive the default hardware ID: ${error.message}. Supply a custom HWID or use "1" to disable device checks.`);
+        }
+        hwidValue = this.config.hwid;
       }
     }
     const challenge = generateChallenge();
     const form = {
       ...extraFields,
       system: this.config.systemId,
-      hwid: this.config.hwid,
+      hwid: hwidValue,
       version: this.config.version,
       beatrate: String(Math.floor(this.config.beatRateMs / 1000)),
       challenge,
@@ -147,6 +179,13 @@ class Client {
     const responseHash = keyAuthentication ? response.licenseKeyHash : response.usernameHash;
     if (responseHash !== identityHash) {
       throw fail(ErrorKind.InvalidPayload, 'Bedrock response identity hash does not match the authentication request.');
+    }
+
+    // The server accepted this identity on this device: re-center the
+    // secret-sharing shares on the hardware observed this launch. Failures
+    // are non-fatal — the next launch re-derives.
+    if (ssSession !== null) {
+      await ssSession.commit();
     }
 
     if (this.session !== null) {
