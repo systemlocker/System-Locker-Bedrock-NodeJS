@@ -23,8 +23,11 @@ const {
   buildShares,
   checkWord,
   hwidOf,
+  CURRENT_NORM_VERSION,
+  mapMandatoryToCurrent,
   normalizeFactors,
   parseHelper,
+  projectFactors,
   recoverCore,
   refreshCore,
   serializeHelper,
@@ -92,16 +95,16 @@ async function prepare(options) {
 
 async function prepareWith(options, collect, source, store) {
   options ??= {};
-  const mandatory = new Set(['slstore']);
+  const requestedMandatory = new Set(['slstore']);
   for (const name of options.extraMandatory ?? []) {
     if (!SLOT_NAME_PATTERN.test(name)) {
       throw new SsError(`slhwid: invalid extra mandatory slot name ${JSON.stringify(name)}`);
     }
-    mandatory.add(name);
+    requestedMandatory.add(name);
   }
 
   const collected = await (collect ?? require('./slhwid-collect.cjs').collect)();
-  const factors = normalizeFactors(collected);
+  const rawFactors = normalizeFactors(collected);
   const randomness = source ?? require('./slhwid-core.cjs').randomSource;
   const theStore = store ?? require('./slhwid-store.cjs').defaultStore(options.storePath);
 
@@ -113,20 +116,22 @@ async function prepareWith(options, collect, source, store) {
   // the persisted value (read-only). An absent value with an existing helper
   // is intentional tampering and recoverCore reports it as a hard-locked
   // mandatory failure below.
-  if (found && !options.forceReenroll && !factors.slstore) {
+  if (found && !options.forceReenroll && !rawFactors.slstore) {
     const value = await theStore.readSlstore();
     if (value) {
       if (value.length !== 32) {
         throw new CorruptHelperError('slhwid: store secret has the wrong size');
       }
-      factors.slstore = value.toString('hex');
+      rawFactors.slstore = value.toString('hex');
     }
   }
 
   if (!found || options.forceReenroll) {
-    if (!factors.slstore) {
-      factors.slstore = await ensureSlstore(theStore, randomness);
+    if (!rawFactors.slstore) {
+      rawFactors.slstore = await ensureSlstore(theStore, randomness);
     }
+    const factors = projectFactors(rawFactors, CURRENT_NORM_VERSION);
+    const mandatory = mapMandatoryToCurrent(requestedMandatory);
     for (const name of [...mandatory].sort()) {
       if (!factors[name]) {
         throw new SsError(`slhwid: mandatory factor ${JSON.stringify(name)} is not available on this machine`);
@@ -138,7 +143,7 @@ async function prepareWith(options, collect, source, store) {
     const draw = new Draw(randomness);
     const k = [draw.elem(), draw.elem(), draw.elem(), draw.elem()];
     const { shares, salt } = buildShares(k, slotList(factors, mandatory), t, draw);
-    const blob = serializeHelper(shares, mandatory, t, salt, checkWord(k));
+    const blob = serializeHelper(shares, mandatory, t, salt, checkWord(k), CURRENT_NORM_VERSION);
     await theStore.writeHelper(hid, blob);
     const session = new Session(hwidOf(k), true, [], false);
     session._key = k;
@@ -150,22 +155,42 @@ async function prepareWith(options, collect, source, store) {
     return session;
   }
 
-  const result = recoverCore(storedBlob, factors);
+  let helper;
+  try {
+    helper = parseHelper(storedBlob);
+  } catch (error) {
+    if (error instanceof CorruptHelperError) {
+      throw new CorruptHelperError('slhwid: stored helper data is corrupt; re-enroll to recover');
+    }
+    throw error;
+  }
+  // Recovery must use the factor schema encoded in the helper. In particular,
+  // v1 slots remain plain raw signals until a successful authentication allows
+  // commit() to migrate the helper to v2.
+  const recoveryFactors = projectFactors(rawFactors, helper.normVersion);
+  const result = recoverCore(storedBlob, recoveryFactors);
   if (!result.ok) {
     if (result.reason === 'corrupt') {
       throw new CorruptHelperError('slhwid: stored helper data is corrupt; re-enroll to recover');
     }
     throw new DriftError(result.present, result.needed, result.missing, result.reason === 'mandatory');
   }
-  const session = new Session(result.hwid, false, result.dead, result.pending);
-  session._key = result.key;
-  session._draw = new Draw(randomness);
-  session._factors = factors;
-  // A second application must not weaken a hard lock selected by the
-  // application that enrolled the shared device helper.
-  session._mandatory = new Set(parseHelper(storedBlob).slots
+  const currentFactors = projectFactors(rawFactors, CURRENT_NORM_VERSION);
+  const storedMandatory = mapMandatoryToCurrent(helper.slots
     .filter((slot) => slot.mandatory)
     .map((slot) => slot.name));
+  const session = new Session(
+    result.hwid,
+    false,
+    result.dead,
+    result.pending || helper.normVersion !== CURRENT_NORM_VERSION,
+  );
+  session._key = result.key;
+  session._draw = new Draw(randomness);
+  session._factors = currentFactors;
+  // A second application must not weaken a hard lock selected by the
+  // application that enrolled the shared device helper.
+  session._mandatory = storedMandatory;
   session._store = theStore;
   session._expectedHelper = Buffer.from(storedBlob);
   return session;

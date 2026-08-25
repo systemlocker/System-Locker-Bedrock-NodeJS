@@ -130,13 +130,19 @@ function ctEqual(a, b) {
 // ── threshold ───────────────────────────────────────────────────────
 
 function threshold(n, m) {
-  if (n < 5) {
-    throw new SsError(`slhwid: need at least 5 enrolled factors, have ${n}`);
+  // A conservative physical-machine floor is nine current-schema slots;
+  // requiring one fewer tolerates one unavailable collector. V1 helpers keep
+  // their stored threshold, so raising this enrollment floor cannot strand an
+  // existing device.
+  if (n < 8) {
+    throw new SsError(`slhwid: need at least 8 enrolled factor slots, have ${n}`);
   }
   if (m >= n) {
     throw new SsError(`slhwid: mandatory slots (${m}) must be fewer than total (${n})`);
   }
-  const [num, den] = n > 10 ? [4, 5] : [7, 10]; // 80% above ten factors, else 70%
+  // Keep both branches explicit for the schema contract. New helpers begin
+  // at eight factors, therefore use the 70% branch today.
+  const [num, den] = n < 8 ? [4, 5] : [7, 10];
   const t = Math.ceil((num * n) / den);
   return Math.max(m + 1, Math.min(t, n));
 }
@@ -155,7 +161,7 @@ const PLACEHOLDERS = new Set([
 
 function normalize(name, raw) {
   let value = String(raw).replace(/\0/g, '').trim().toLowerCase();
-  if (name === 'mac') {
+  if (name === 'mac' || name === 'nic_identity') {
     value = value.replace(/[:\-]/g, '');
   }
   return value;
@@ -174,6 +180,91 @@ function normalizeFactors(raw) {
     }
   }
   return out;
+}
+
+const LEGACY_NORM_VERSION = 1;
+const CURRENT_NORM_VERSION = 2;
+
+// These names are historical compatibility data. Do not change this list:
+// schema-v1 helpers need the exact slots they were enrolled against.
+const LEGACY_FACTOR_NAMES = Object.freeze([
+  'slstore', 'machine_guid', 'product_uuid', 'board_serial', 'cpu_id', 'disk_serial', 'mac',
+  'ram_total', 'volume_id', 'computer_name', 'firmware', 'gpu_id', 'monitor_edid', 'os_build',
+]);
+
+const CURRENT_DIRECT_FACTOR_NAMES = Object.freeze([
+  'slstore', 'machine_guid', 'cpu_id', 'disk_serial', 'ram_total', 'volume_id', 'firmware',
+  'tpm_ek', 'memory_modules', 'nic_identity', 'battery_serial',
+]);
+
+const CURRENT_FACTOR_GROUPS = Object.freeze([
+  ['platform_identity', ['system_uuid', 'board_serial', 'system_serial', 'chassis_serial']],
+  ['display_group', ['gpu_id', 'monitor_edid']],
+  ['software_environment', ['computer_name', 'os_build']],
+]);
+
+function groupValue(name, members, raw) {
+  const hash = crypto.createHash('sha256');
+  hash.update('SL-HWID-GROUP2\0', 'ascii');
+  hash.update(name, 'ascii');
+  hash.update(Buffer.from([0]));
+  let present = false;
+  for (const member of members) {
+    const value = raw[member] ?? '';
+    present ||= value !== '';
+    hash.update(member, 'ascii');
+    hash.update(Buffer.from([0]));
+    if (value !== '') {
+      hash.update(value, 'utf8');
+    }
+    hash.update(Buffer.from([0]));
+  }
+  return present ? hash.digest('hex') : '';
+}
+
+/** Projects collected raw signals into the helper's factor schema. */
+function projectFactors(raw, normVersion) {
+  const output = {};
+  if (normVersion === LEGACY_NORM_VERSION) {
+    for (const name of LEGACY_FACTOR_NAMES) {
+      if (raw[name]) {
+        output[name] = raw[name];
+      }
+    }
+    return output;
+  }
+  if (normVersion !== CURRENT_NORM_VERSION) {
+    throw new SsError(`slhwid: unsupported factor schema ${normVersion}`);
+  }
+  for (const name of CURRENT_DIRECT_FACTOR_NAMES) {
+    if (raw[name]) {
+      output[name] = raw[name];
+    }
+  }
+  for (const [name, members] of CURRENT_FACTOR_GROUPS) {
+    const value = groupValue(name, members, raw);
+    if (value) {
+      output[name] = value;
+    }
+  }
+  return output;
+}
+
+function currentMandatoryName(name) {
+  if (['product_uuid', 'board_serial', 'system_uuid', 'system_serial', 'chassis_serial'].includes(name)) {
+    return 'platform_identity';
+  }
+  if (name === 'gpu_id' || name === 'monitor_edid') {
+    return 'display_group';
+  }
+  if (name === 'computer_name' || name === 'os_build') {
+    return 'software_environment';
+  }
+  return name === 'mac' ? 'nic_identity' : name;
+}
+
+function mapMandatoryToCurrent(names) {
+  return new Set([...names].map(currentMandatoryName));
 }
 
 // ── sharing ─────────────────────────────────────────────────────────
@@ -222,11 +313,11 @@ function buildShares(k, slots, t, draw) {
 
 // ── helper blob ─────────────────────────────────────────────────────
 
-function serializeHelper(shares, mandatory, t, salt, cw) {
+function serializeHelper(shares, mandatory, t, salt, cw, normVersion = CURRENT_NORM_VERSION) {
   const names = Object.keys(shares).sort();
   const payload = Buffer.alloc(8 + names.length * 35 + names.reduce((a, n) => a + n.length, 0));
   payload.writeUInt8(1, 0); // version
-  payload.writeUInt8(1, 1); // norm_version
+  payload.writeUInt8(normVersion, 1); // factor schema version
   payload.writeUInt8(salt, 2);
   payload.writeUInt8(names.length, 3);
   payload.writeUInt8(names.filter((n) => mandatory.has(n)).length, 4);
@@ -270,7 +361,10 @@ function parseHelper(blob) {
   if (body[0] !== 1) {
     throw corrupt(`unsupported version ${body[0]}`);
   }
-  const helper = { salt: body[2], threshold: body[5], checkWord: cw, slots: [] };
+  if (body[1] !== LEGACY_NORM_VERSION && body[1] !== CURRENT_NORM_VERSION) {
+    throw corrupt(`unsupported factor schema ${body[1]}`);
+  }
+  const helper = { normVersion: body[1], salt: body[2], threshold: body[5], checkWord: cw, slots: [] };
   const n = body[3];
   let offset = 8;
   const seen = new Set();
@@ -473,6 +567,12 @@ function recoverCore(blob, factors) {
 }
 
 function refreshCore(k, factors, mandatory, draw) {
+  // During v1-to-v2 migration a legacy hard lock can map to a grouped slot.
+  // If the current collector cannot produce that slot, skip the rewrite: a
+  // refresh that omitted it would silently weaken the original hard lock.
+  if ([...mandatory].some((name) => !factors[name])) {
+    return { blob: null, written: false };
+  }
   const slots = slotList(factors, mandatory);
   const m = slots.filter((s) => s.mandatory).length;
   let t;
@@ -482,7 +582,7 @@ function refreshCore(k, factors, mandatory, draw) {
     return { blob: null, written: false };
   }
   const { shares, salt } = buildShares(k, slots, t, draw);
-  const blob = serializeHelper(shares, mandatory, t, salt, checkWord(k));
+  const blob = serializeHelper(shares, mandatory, t, salt, checkWord(k), CURRENT_NORM_VERSION);
   return { blob, written: true };
 }
 
@@ -505,6 +605,15 @@ module.exports = {
   threshold,
   normalize,
   normalizeFactors,
+  LEGACY_NORM_VERSION,
+  CURRENT_NORM_VERSION,
+  LEGACY_FACTOR_NAMES,
+  CURRENT_DIRECT_FACTOR_NAMES,
+  CURRENT_FACTOR_GROUPS,
+  groupValue,
+  projectFactors,
+  currentMandatoryName,
+  mapMandatoryToCurrent,
   slotList,
   buildShares,
   serializeHelper,

@@ -30,12 +30,29 @@ function firstMatch(pattern, text) {
   return match ? match[1] : '';
 }
 
-function allMatches(pattern, text) {
-  return [...text.matchAll(new RegExp(pattern, 'g'))].map((m) => m[1]);
+function allMatches(pattern, text, flags = 'g') {
+  return [...text.matchAll(new RegExp(pattern, flags))].map((m) => m[1]);
 }
 
 function multiInstance(values) {
   return values.filter((v) => v).sort().join('|');
+}
+
+function put(factors, name, value) {
+  if (value) {
+    factors[name] = value;
+  }
+}
+
+function namedLines(text) {
+  const factors = {};
+  for (const line of text.split('\n')) {
+    const separator = line.indexOf('=');
+    if (separator > 0 && separator + 1 < line.length) {
+      factors[line.slice(0, separator)] = line.slice(separator + 1).trim();
+    }
+  }
+  return factors;
 }
 
 async function regTypedValue(regPath, name) {
@@ -180,6 +197,22 @@ async function collectWindows() {
     factors.mac = mac;
   }
 
+  // CIM-backed v2 signals deliberately supplement rather than replace the
+  // legacy collection above: v1 helpers still recover from those raw slots.
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    "function Emit($n,$v){$c=@($v|Where-Object {$_ -ne $null -and ([string]$_).Trim().Length -gt 0}|ForEach-Object {([string]$_).Trim()}|Sort-Object);if($c.Count -gt 0){Write-Output ($n+'='+($c -join '|'))}}",
+    "$p=Get-CimInstance Win32_ComputerSystemProduct;Emit 'system_uuid' $p.UUID;Emit 'system_serial' $p.IdentifyingNumber",
+    "Emit 'chassis_serial' (Get-CimInstance Win32_SystemEnclosure).SerialNumber",
+    "Emit 'disk_serial' (Get-CimInstance Win32_DiskDrive).SerialNumber",
+    "Emit 'memory_modules' (Get-CimInstance Win32_PhysicalMemory).SerialNumber",
+    "Emit 'nic_identity' (Get-CimInstance Win32_NetworkAdapter|Where-Object {$_.PhysicalAdapter}).PermanentAddress",
+    "Emit 'battery_serial' (Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData).SerialNumber",
+    "$ek=Get-TpmEndorsementKeyInfo -HashAlgorithm Sha256;if($ek.IsPresent){Emit 'tpm_ek' $ek.PublicKeyHash}",
+  ].join(';');
+  const v2 = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], 12000);
+  Object.assign(factors, namedLines(v2.stdout));
+
   return factors;
 }
 
@@ -194,6 +227,7 @@ async function collectDarwin() {
   const serial = firstMatch('"IOPlatformSerialNumber"\\s*=\\s*"([^"]+)"', expert.stdout);
   if (serial) {
     factors.board_serial = serial;
+    factors.system_serial = serial;
   }
 
   let brand = (await run('sysctl', ['-n', 'machdep.cpu.brand_string'])).stdout.trim();
@@ -210,6 +244,9 @@ async function collectDarwin() {
   if (mac) {
     factors.mac = mac;
   }
+
+  const hardwarePorts = await run('networksetup', ['-listallhardwareports']);
+  put(factors, 'nic_identity', multiInstance(allMatches('Ethernet Address:\\s*([0-9a-fA-F:]{17})', hardwarePorts.stdout)));
 
   const memsize = (await run('sysctl', ['-n', 'hw.memsize'])).stdout.trim();
   if (memsize) {
@@ -233,6 +270,17 @@ async function collectDarwin() {
   if (bootrom) {
     factors.firmware = bootrom;
   }
+
+  const memory = await run('system_profiler', ['SPMemoryDataType', '-json'], 5000);
+  put(factors, 'memory_modules', multiInstance(allMatches('"[^\"]*serial[^\"]*"\\s*:\\s*"([^\"]+)"', memory.stdout)));
+
+  const battery = await run('ioreg', ['-r', '-c', 'AppleSmartBattery']);
+  put(
+    factors,
+    'battery_serial',
+    firstMatch('"BatterySerialNumber"\\s*=\\s*"([^\"]+)"', battery.stdout)
+      || firstMatch('"Serial"\\s*=\\s*"?([^"\\n]+)"?', battery.stdout),
+  );
 
   const displays = await run('system_profiler', ['SPDisplaysDataType', '-json'], 5000);
   const models = allMatches('"spdisplays_model"\\s*:\\s*"([^"]+)"', displays.stdout);
@@ -297,6 +345,58 @@ async function collectLinux() {
       const value = fs.readFileSync(file, 'ascii').trim();
       if (value) {
         factors[slot] = value;
+      }
+    } catch { /* absent */ }
+  }
+
+  const extraDmi = [
+    ['system_uuid', '/sys/class/dmi/id/product_uuid'],
+    ['system_serial', '/sys/class/dmi/id/product_serial'],
+    ['chassis_serial', '/sys/class/dmi/id/chassis_serial'],
+  ];
+  for (const [slot, file] of extraDmi) {
+    try {
+      put(factors, slot, fs.readFileSync(file, 'ascii').trim());
+    } catch { /* absent */ }
+  }
+
+  const memory = await run('dmidecode', ['--type', 'memory'], 5000);
+  put(factors, 'memory_modules', multiInstance(allMatches('^\\s*Serial Number:\\s*(\\S.*)$', memory.stdout, 'gm')));
+
+  const nicIds = [];
+  try {
+    for (const name of fs.readdirSync('/sys/class/net').sort()) {
+      const device = `/sys/class/net/${name}/device`;
+      const permanent = `${device}/perm_address`;
+      if (!fs.existsSync(device) || !fs.existsSync(permanent)) {
+        continue;
+      }
+      const value = fs.readFileSync(permanent, 'ascii').trim();
+      if (value && value !== '00:00:00:00:00:00') {
+        nicIds.push(value);
+      }
+    }
+  } catch { /* absent */ }
+  put(factors, 'nic_identity', multiInstance(nicIds));
+
+  const batteries = [];
+  try {
+    for (const name of fs.readdirSync('/sys/class/power_supply').filter((entry) => entry.startsWith('BAT')).sort()) {
+      const serial = `/sys/class/power_supply/${name}/serial_number`;
+      if (fs.existsSync(serial)) {
+        const value = fs.readFileSync(serial, 'ascii').trim();
+        if (value) batteries.push(value);
+      }
+    }
+  } catch { /* absent */ }
+  put(factors, 'battery_serial', multiInstance(batteries));
+
+  for (const file of ['/sys/class/tpm/tpm0/device/ek_pub', '/sys/class/tpm/tpm0/ek_pub']) {
+    try {
+      const value = fs.readFileSync(file);
+      if (value.length > 0) {
+        factors.tpm_ek = require('crypto').createHash('sha256').update(value).digest('hex');
+        break;
       }
     } catch { /* absent */ }
   }
