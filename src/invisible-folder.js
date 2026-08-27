@@ -83,8 +83,14 @@ class InvisibleFolder {
       throw fail(ErrorKind.SessionTerminated, 'No Invisible Folder token is available. Request one during initialization or a heartbeat.');
     }
 
+    // The download route is a plain GET; credentials travel in headers
+    // because GET request bodies are not supported.
     const url = this.client.endpoint(this.client.config.invisibleFolderBaseUrl, DOWNLOAD_PREFIX) + referenceId;
-    const httpResponse = await this.client.transport.postForm(url, { invisiblefolder_token: this.token }, {});
+    const headers = {
+      'X-Invisiblefolder-Download': '1',
+      'X-Invisiblefolder-Token': this.token,
+    };
+    const httpResponse = await this.client.transport.get(url, headers);
     if (!responseOk(httpResponse)) {
       const message = errorMessage(httpResponse);
       throw message !== ''

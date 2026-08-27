@@ -14,7 +14,7 @@ function defaultConfig() {
     maxServerClockSkewSeconds: 120,
     baseUrl: 'https://systemlocker.net',
     invisibleFolderBaseUrl: 'https://invisiblefolder.net',
-    userAgent: 'systemlocker-bedrock-node/1.0',
+    userAgent: 'systemlocker-bedrock-node/1.0.0',
     programDigest: null,
     signingKeyId: null,
     invisibleFolderApiKey: null,

@@ -11,7 +11,7 @@ class FetchHttpClient {
    */
   constructor(options = {}) {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
-    this.userAgent = options.userAgent ?? 'systemlocker-bedrock-node/0.1';
+    this.userAgent = options.userAgent ?? 'systemlocker-bedrock-node/1.0.0';
   }
 
   async _execute(method, url, { form = null, headers = {} } = {}) {
